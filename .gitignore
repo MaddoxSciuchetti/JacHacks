@@ -1,0 +1,17 @@
+packages/
+*.jbc
+*.jir
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+*.swp
+node_modules/
+.jac/
+dist/
+*.session
+*.session.*
+artifacts/
+runs/
