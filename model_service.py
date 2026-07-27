@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -26,7 +27,31 @@ DEFAULT_PIPELINE_FILE = (
     / "jac_codebert_pipeline.py"
 )
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "runs" / "jac-codebert"
+DEFAULT_MAX_WINDOWS = 1_000
 GITHUB_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+EXCLUDED_DIRECTORY_NAMES = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "bench",
+        "benchmark",
+        "benchmarks",
+        "doc",
+        "docs",
+        "documentation",
+        "example",
+        "examples",
+        "fixture",
+        "fixtures",
+        "generated",
+        "node_modules",
+        "test",
+        "testing",
+        "tests",
+        "vendor",
+        "vendors",
+    }
+)
 
 TYPE_TITLES = {
     "CODE_INJECTION": "Code injection",
@@ -67,6 +92,25 @@ def _threshold() -> float:
     return value
 
 
+def _is_scannable_jac_path(path: str | Path) -> bool:
+    """Return whether a repository path contains production Jac source."""
+    candidate = Path(path)
+    if candidate.suffix.lower() != ".jac":
+        return False
+
+    directory_names = {part.lower() for part in candidate.parts[:-1]}
+    if directory_names & EXCLUDED_DIRECTORY_NAMES:
+        return False
+
+    filename = candidate.name.lower()
+    return not (
+        filename.startswith("test_")
+        or filename.endswith("_test.jac")
+        or filename.endswith(".test.jac")
+        or filename.endswith(".spec.jac")
+    )
+
+
 def _canonical_github_url(repository: str) -> str:
     parsed = urlparse(repository.strip())
     if (
@@ -96,6 +140,20 @@ def _canonical_github_url(repository: str) -> str:
     ):
         raise ValueError("The GitHub owner or repository name is invalid.")
     return f"https://github.com/{owner}/{repo}.git"
+
+
+def _finding_source_url(
+    repository: str,
+    path: str,
+    line_start: int,
+    line_end: int,
+) -> str:
+    """Build a GitHub link to the finding's exact source line range."""
+    encoded_path = quote(path, safe="/")
+    return (
+        f"{repository.removesuffix('.git')}/blob/HEAD/{encoded_path}"
+        f"#L{line_start}-L{line_end}"
+    )
 
 
 def _load_pipeline(path: Path) -> ModuleType:
@@ -189,24 +247,42 @@ def _runtime() -> dict[str, Any]:
 def _clone_repository(repository: str, destination: Path) -> None:
     environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     timeout = _positive_int("JAC_GIT_TIMEOUT_SECONDS", 120)
-    completed = subprocess.run(
-        [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            "--filter=blob:none",
-            "--single-branch",
-            "--no-checkout",
-            repository,
-            str(destination),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=environment,
+    max_file_bytes = _positive_int("JAC_SCAN_MAX_FILE_BYTES", 262_144)
+    minimum_free_bytes = _positive_int(
+        "JAC_SCAN_MIN_FREE_BYTES",
+        268_435_456,
     )
+    available_bytes = shutil.disk_usage(destination.parent).free
+    if available_bytes < minimum_free_bytes:
+        raise RuntimeError(
+            "Not enough free disk space to scan a repository: "
+            f"{available_bytes // 1_048_576} MiB available, "
+            f"{minimum_free_bytes // 1_048_576} MiB required."
+        )
+
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                f"--filter=blob:limit={max_file_bytes}",
+                "--single-branch",
+                "--no-checkout",
+                repository,
+                str(destination),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Git clone timed out after {timeout} seconds."
+        ) from error
     if completed.returncode != 0:
         detail = completed.stderr.strip().splitlines()
         message = detail[-1] if detail else "git clone failed"
@@ -229,30 +305,43 @@ def _clone_repository(repository: str, destination: Path) -> None:
         metadata, raw_path = entry.split(b"\t", 1)
         mode = metadata.split(b" ", 1)[0]
         path = raw_path.decode("utf-8", errors="surrogateescape")
-        if mode in {b"100644", b"100755"} and path.endswith(".jac"):
+        if (
+            mode in {b"100644", b"100755"}
+            and _is_scannable_jac_path(path)
+        ):
             jac_paths.append(path)
         if len(jac_paths) >= _positive_int("JAC_SCAN_MAX_FILES", 200):
             break
 
     if jac_paths:
-        checkout = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(destination),
-                "checkout",
-                "HEAD",
-                "--",
-                *jac_paths,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=environment,
-        )
+        try:
+            checkout = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(destination),
+                    "checkout",
+                    "HEAD",
+                    "--",
+                    *jac_paths,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                "Fetching repository Jac files timed out after "
+                f"{timeout} seconds."
+            ) from error
         if checkout.returncode != 0:
-            raise RuntimeError("Could not check out repository Jac files.")
+            detail = checkout.stderr.strip().splitlines()
+            message = detail[-1] if detail else "git checkout failed"
+            raise RuntimeError(
+                f"Could not check out repository Jac files: {message}"
+            )
 
 
 def _scan_checkout(checkout: Path, repository: str) -> dict[str, object]:
@@ -262,12 +351,19 @@ def _scan_checkout(checkout: Path, repository: str) -> dict[str, object]:
     device = runtime["device"]
     max_files = _positive_int("JAC_SCAN_MAX_FILES", 200)
     max_file_bytes = _positive_int("JAC_SCAN_MAX_FILE_BYTES", 262_144)
-    max_windows = _positive_int("JAC_SCAN_MAX_WINDOWS", 10_000)
+    max_windows = _positive_int(
+        "JAC_SCAN_MAX_WINDOWS",
+        DEFAULT_MAX_WINDOWS,
+    )
     batch_size = _positive_int("JAC_SCAN_BATCH_SIZE", 64)
     max_findings = _positive_int("JAC_SCAN_MAX_FINDINGS", 50)
     threshold = _threshold()
 
-    files = sorted(checkout.rglob("*.jac"))[:max_files]
+    files = [
+        path
+        for path in sorted(checkout.rglob("*.jac"))
+        if _is_scannable_jac_path(path.relative_to(checkout))
+    ][:max_files]
     candidate_rows: list[dict[str, object]] = []
     files_scanned = 0
     for path in files:
@@ -395,6 +491,12 @@ def _scan_checkout(checkout: Path, repository: str) -> dict[str, object]:
                     "path": path,
                     "line_start": int(finding["line_start"]),
                     "line_end": int(finding["line_end"]),
+                    "source_url": _finding_source_url(
+                        repository,
+                        path,
+                        int(finding["line_start"]),
+                        int(finding["line_end"]),
+                    ),
                     "confidence": float(
                         finding["vulnerability_confidence"]
                     ),
