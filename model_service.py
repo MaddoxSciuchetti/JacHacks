@@ -73,6 +73,11 @@ HIGH_SEVERITY = {
     "SQL_INJECTION",
     "UNSAFE_DESERIALIZATION",
 }
+SCORE_RISK_WEIGHTS = {
+    "High": 0.45,
+    "Medium": 0.25,
+}
+SCORE_REPEAT_DISCOUNT = 0.5
 
 _RUNTIME_LOCK = threading.Lock()
 _RUNTIME_CACHE: dict[str, Any] | None = None
@@ -90,6 +95,35 @@ def _threshold() -> float:
     if not 0.0 < value < 1.0:
         raise RuntimeError("JAC_SCAN_THRESHOLD must be between zero and one.")
     return value
+
+
+def _repository_score(findings: list[dict[str, object]]) -> int:
+    """Return a calibrated score from distinct model-risk signals.
+
+    Sliding source windows are correlated observations, not independent
+    vulnerabilities. Keep only the strongest observation for each
+    file/category pair, then discount each additional distinct signal.
+    """
+    strongest_by_signal: dict[tuple[str, str], float] = {}
+    for finding in findings:
+        severity = str(finding["severity"])
+        confidence = min(max(float(finding["confidence"]), 0.0), 1.0)
+        signal = (
+            str(finding.get("path", "")),
+            str(finding.get("title", severity)),
+        )
+        risk = SCORE_RISK_WEIGHTS.get(severity, 0.15) * confidence
+        strongest_by_signal[signal] = max(
+            strongest_by_signal.get(signal, 0.0),
+            risk,
+        )
+
+    total_risk = 0.0
+    discount = 1.0
+    for risk in sorted(strongest_by_signal.values(), reverse=True):
+        total_risk += risk * discount
+        discount *= SCORE_REPEAT_DISCOUNT
+    return round(100.0 * max(0.0, 1.0 - min(total_risk, 1.0)))
 
 
 def _is_scannable_jac_path(path: str | Path) -> bool:
@@ -413,6 +447,7 @@ def _scan_checkout(checkout: Path, repository: str) -> dict[str, object]:
             "device": str(device),
             "files_scanned": files_scanned,
             "windows_scanned": 0,
+            "score": 100,
             "findings": [],
         }
 
@@ -507,12 +542,14 @@ def _scan_checkout(checkout: Path, repository: str) -> dict[str, object]:
         key=lambda item: float(item["confidence"]),
         reverse=True,
     )
+    final_findings = rendered_findings[:max_findings]
     return {
         "repository": repository.removesuffix(".git"),
         "device": str(device),
         "files_scanned": files_scanned,
         "windows_scanned": len(candidate_rows),
-        "findings": rendered_findings[:max_findings],
+        "score": _repository_score(final_findings),
+        "findings": final_findings,
     }
 
 
