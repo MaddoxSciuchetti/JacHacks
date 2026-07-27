@@ -212,6 +212,44 @@ input {
     white-space: nowrap;
 }
 
+.result-metrics {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 0.75rem;
+    margin-left: 1rem;
+}
+
+.score {
+    display: grid;
+    grid-template-columns: auto auto;
+    align-items: baseline;
+    color: #252525;
+    line-height: 1;
+}
+
+.score-value {
+    font-size: 1.5rem;
+    font-weight: 750;
+    letter-spacing: -0.04em;
+}
+
+.score-total {
+    color: #858585;
+    font-size: 0.7rem;
+    font-weight: 650;
+}
+
+.score-label {
+    grid-column: 1 / -1;
+    margin-top: 0.2rem;
+    color: #686868;
+    font-size: 0.6rem;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
 .result-tabs {
     display: flex;
     gap: 1.25rem;
@@ -509,5 +547,15 @@ input {
 
     .verify-button {
         width: 100%;
+    }
+
+    .result-heading {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.9rem;
+    }
+
+    .result-metrics {
+        margin-left: 0;
     }
 }

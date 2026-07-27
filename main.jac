@@ -20,6 +20,7 @@ obj ScanResult {
     has files_scanned: int;
     has windows_scanned: int;
     has elapsed_seconds: float;
+    has score: int;
     has findings: list[ScanFinding];
     has error_message: str = "";
 }
@@ -35,6 +36,7 @@ def:pub scan_repository(repository: str) -> ScanResult {
             files_scanned=0,
             windows_scanned=0,
             elapsed_seconds=0.0,
+            score=0,
             findings=[],
             error_message=str(error),
         );
@@ -60,6 +62,7 @@ def:pub scan_repository(repository: str) -> ScanResult {
         files_scanned=raw["files_scanned"] as int,
         windows_scanned=raw["windows_scanned"] as int,
         elapsed_seconds=raw["elapsed_seconds"] as float,
+        score=raw["score"] as int,
         findings=findings,
     );
 }
@@ -87,7 +90,7 @@ cl def reagraph_nodes(
             "label": "Repository",
             "subLabel": repository,
             "fill": "#2e2e2e",
-            "size": 16,
+            "size": 26,
         }
     ];
     file_paths = graph_file_paths(findings);
@@ -98,7 +101,7 @@ cl def reagraph_nodes(
                 "label": file_path.split("/")[-1],
                 "subLabel": file_path,
                 "fill": "#7a7a7a",
-                "size": 12,
+                "size": 20,
             }
         );
     }
@@ -109,7 +112,7 @@ cl def reagraph_nodes(
                 "label": finding.title,
                 "subLabel": f"{finding.path} · {finding.confidence * 100:.0f}%",
                 "fill": "#c94c4c" if finding.severity == "High" else "#d79b3b",
-                "size": 10,
+                "size": 18,
             }
         );
     }
@@ -251,9 +254,19 @@ cl def:pub app -> JsxElement {
                                     Production Jac source only · docs, tests, examples, and fixtures excluded
                                 </p>
                             </div>
-                            <span className="scan-badge">
-                                {f"CodeBERT · {scan_result.device}"}
-                            </span>
+                            <div className="result-metrics">
+                                <div
+                                    className="score"
+                                    aria-label={f"Repository security score: {scan_result.score} out of 100"}
+                                >
+                                    <span className="score-value">{scan_result.score}</span>
+                                    <span className="score-total">/100</span>
+                                    <span className="score-label">Security score</span>
+                                </div>
+                                <span className="scan-badge">
+                                    {f"CodeBERT · {scan_result.device}"}
+                                </span>
+                            </div>
                         </div>
 
                         <div className="result-tabs" role="tablist" aria-label="Scan result views">

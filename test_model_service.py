@@ -13,6 +13,55 @@ import model_service
 
 
 class CloneRepositoryTests(unittest.TestCase):
+    def test_repository_score_weights_severity_and_confidence(self) -> None:
+        findings: list[dict[str, object]] = [
+            {
+                "path": "main.jac",
+                "title": "SQL injection",
+                "severity": "High",
+                "confidence": 0.8,
+            },
+            {
+                "path": "main.jac",
+                "title": "Cross-site scripting",
+                "severity": "Medium",
+                "confidence": 0.4,
+            },
+        ]
+
+        self.assertEqual(model_service._repository_score(findings), 59)
+        self.assertEqual(model_service._repository_score([]), 100)
+
+    def test_repository_score_does_not_double_count_overlapping_windows(
+        self,
+    ) -> None:
+        findings = [
+            {
+                "path": "main.jac",
+                "title": "SQL injection",
+                "severity": "High",
+                "confidence": confidence,
+            }
+            for confidence in (0.65, 0.8, 0.95, 0.7)
+        ]
+
+        self.assertEqual(model_service._repository_score(findings), 57)
+
+    def test_repository_score_discounts_additional_distinct_signals(
+        self,
+    ) -> None:
+        findings = [
+            {
+                "path": f"src/file_{index}.jac",
+                "title": "SQL injection",
+                "severity": "High",
+                "confidence": 1.0,
+            }
+            for index in range(10)
+        ]
+
+        self.assertEqual(model_service._repository_score(findings), 10)
+
     def test_finding_source_url_targets_exact_encoded_lines(self) -> None:
         self.assertEqual(
             model_service._finding_source_url(
